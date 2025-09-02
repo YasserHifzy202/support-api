@@ -2,3 +2,5 @@ fastapi
 uvicorn
 pydantic
 firebase-admin
+python-multipart       
+google-cloud-storage    
