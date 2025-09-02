@@ -4,20 +4,23 @@ from pydantic import BaseModel
 from datetime import datetime
 import os, json
 
+# Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore, messaging
 from google.cloud import storage
 
 app = FastAPI()
 
+# ===== مفاتيح البيئة =====
 INBOUND_API_KEY = os.getenv("INBOUND_API_KEY", "SUPPORT_KEY_2025")
-FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET", "")
+FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET", "")  # ex: system-c9953.appspot.com
 
+# ===== تهيئة Firebase =====
 creds_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
 if creds_json:
     cred = credentials.Certificate(json.loads(creds_json))
 else:
-    cred = credentials.Certificate("serviceAccountKey.json")
+    cred = credentials.Certificate("serviceAccountKey.json")  # للاستخدام المحلي فقط
 
 if not firebase_admin._apps:
     firebase_admin.initialize_app(cred, {
@@ -28,7 +31,8 @@ db = firestore.client()
 gcs_client = storage.Client() if FIREBASE_STORAGE_BUCKET else None
 bucket = gcs_client.bucket(FIREBASE_STORAGE_BUCKET) if gcs_client else None
 
-# ----- Gmail inbound endpoint -----
+
+# ===== نموذج البريد القادم من Gmail =====
 class GmailPayload(BaseModel):
     from_: str | None = None
     subject: str
@@ -39,6 +43,8 @@ class GmailPayload(BaseModel):
     threadId: str
     attachments: list[dict] = []
 
+
+# ===== Gmail → Firestore =====
 @app.post("/inbound/email")
 async def receive_email(request: Request):
     if request.headers.get("x-api-key") != INBOUND_API_KEY:
@@ -56,6 +62,8 @@ async def receive_email(request: Request):
         "attachments": data.get("attachments", []),
     })
 
+    print(f"📩 Email from: {msg.from_} | Subject: {msg.subject}")
+
     db.collection("tickets").document(msg.msgId).set({
         "type": "email",
         "from": msg.from_,
@@ -65,6 +73,7 @@ async def receive_email(request: Request):
         "date": msg.date,
         "threadId": msg.threadId,
         "status": "new",
+        "attachments": msg.attachments,
         "createdAt": datetime.utcnow().isoformat() + "Z"
     })
 
@@ -77,11 +86,12 @@ async def receive_email(request: Request):
             topic="all"
         ))
     except Exception as e:
-        print("FCM error:", e)
+        print("⚠️ FCM error:", e)
 
     return {"status": "stored & notified"}
 
-# ----- Flutter tickets endpoint -----
+
+# ===== Flutter → Firestore + Storage =====
 @app.post("/tickets")
 async def create_ticket(
     title: str = Form(...),
@@ -140,6 +150,12 @@ async def create_ticket(
             topic="all"
         ))
     except Exception as e:
-        print("FCM error:", e)
+        print("⚠️ FCM error:", e)
 
     return {"ok": True, "ticketId": ticket_id, "files": files_meta}
+
+
+# ===== Health Check =====
+@app.get("/health")
+def health():
+    return {"ok": True}
