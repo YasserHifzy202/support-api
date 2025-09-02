@@ -1,32 +1,34 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Form, UploadFile, File, Header
+from typing import List
 from pydantic import BaseModel
 from datetime import datetime
 import os, json
 
-# Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore, messaging
+from google.cloud import storage
 
 app = FastAPI()
 
-# ===== مفاتيح البيئة =====
 INBOUND_API_KEY = os.getenv("INBOUND_API_KEY", "SUPPORT_KEY_2025")
+FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET", "")
 
-# خدمة Firebase: نقرأ JSON من متغيّر بيئة (Render) أو من ملف محلي
-creds_json = os.getenv("FIREBASE_CREDENTIALS_JSON")  # مفضّل على Render
+creds_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
 if creds_json:
     cred = credentials.Certificate(json.loads(creds_json))
 else:
-    # للاستخدام المحلي فقط إذا عندك ملف بجنب main.py
     cred = credentials.Certificate("serviceAccountKey.json")
 
 if not firebase_admin._apps:
-    firebase_admin.initialize_app(cred)
+    firebase_admin.initialize_app(cred, {
+        "storageBucket": FIREBASE_STORAGE_BUCKET or None
+    })
 
 db = firestore.client()
+gcs_client = storage.Client() if FIREBASE_STORAGE_BUCKET else None
+bucket = gcs_client.bucket(FIREBASE_STORAGE_BUCKET) if gcs_client else None
 
-
-# ===== نموذج البيانات =====
+# ----- Gmail inbound endpoint -----
 class GmailPayload(BaseModel):
     from_: str | None = None
     subject: str
@@ -37,11 +39,8 @@ class GmailPayload(BaseModel):
     threadId: str
     attachments: list[dict] = []
 
-
-# ===== المسار الذي يستقبل البريد =====
 @app.post("/inbound/email")
 async def receive_email(request: Request):
-    # حماية بسيطة بالمفتاح
     if request.headers.get("x-api-key") != INBOUND_API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -57,27 +56,18 @@ async def receive_email(request: Request):
         "attachments": data.get("attachments", []),
     })
 
-    # طباعة للمتابعة
-    print(f"📩 Received email from: {msg.from_}")
-    print(f"Subject: {msg.subject}")
-    print(f"Body: {msg.bodyPlain}")
-    print(f"Date: {msg.date}")
-    print(f"Attachments: {[a.get('name') for a in msg.attachments]}")
-
-    # ===== تخزين التذكرة في Firestore =====
-    ticket = {
+    db.collection("tickets").document(msg.msgId).set({
+        "type": "email",
         "from": msg.from_,
         "subject": msg.subject,
         "body": msg.bodyPlain,
         "html": msg.bodyHtml,
         "date": msg.date,
         "threadId": msg.threadId,
-        "status": "new",  # new | in_progress | resolved | rejected
+        "status": "new",
         "createdAt": datetime.utcnow().isoformat() + "Z"
-    }
-    db.collection("tickets").document(msg.msgId).set(ticket)
+    })
 
-    # ===== إشعار FCM (لكل من اشترك بموضوع all) =====
     try:
         messaging.send(messaging.Message(
             notification=messaging.Notification(
@@ -86,8 +76,70 @@ async def receive_email(request: Request):
             ),
             topic="all"
         ))
-        print("✅ FCM notification sent.")
     except Exception as e:
-        print(f"⚠️ FCM error: {e}")
+        print("FCM error:", e)
 
     return {"status": "stored & notified"}
+
+# ----- Flutter tickets endpoint -----
+@app.post("/tickets")
+async def create_ticket(
+    title: str = Form(...),
+    description: str = Form(...),
+    userId: str = Form(...),
+    userEmail: str = Form(...),
+    system: str = Form("poultry"),
+    attachments: List[UploadFile] = File([]),
+    x_api_key: str = Header(None)
+):
+    if x_api_key != INBOUND_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    doc_ref = db.collection("tickets").document()
+    ticket_id = doc_ref.id
+
+    files_meta = []
+    if bucket and attachments:
+        for f in attachments:
+            fname = f.filename or "file"
+            blob_path = f"tickets/{ticket_id}/{fname}"
+            blob = bucket.blob(blob_path)
+            blob.upload_from_file(f.file, content_type=f.content_type)
+            try:
+                blob.make_public()
+                url = blob.public_url
+            except Exception:
+                url = blob_path
+            files_meta.append({
+                "name": fname,
+                "contentType": f.content_type,
+                "url": url,
+                "path": blob_path
+            })
+            f.file.close()
+
+    data = {
+        "type": "app",
+        "title": title,
+        "description": description,
+        "userId": userId,
+        "userEmail": userEmail,
+        "system": system,
+        "attachments": files_meta,
+        "status": "submitted",
+        "createdAt": datetime.utcnow().isoformat() + "Z"
+    }
+    doc_ref.set(data)
+
+    try:
+        messaging.send(messaging.Message(
+            notification=messaging.Notification(
+                title="🧩 New app ticket",
+                body=title
+            ),
+            topic="all"
+        ))
+    except Exception as e:
+        print("FCM error:", e)
+
+    return {"ok": True, "ticketId": ticket_id, "files": files_meta}
