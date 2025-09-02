@@ -6,14 +6,13 @@ import os, json
 
 # Firebase
 import firebase_admin
-from firebase_admin import credentials, firestore, messaging
-from google.cloud import storage
+from firebase_admin import credentials, firestore, messaging, storage
 
 app = FastAPI()
 
 # ===== مفاتيح البيئة =====
 INBOUND_API_KEY = os.getenv("INBOUND_API_KEY", "SUPPORT_KEY_2025")
-FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET", "")  # ex: system-c9953.appspot.com
+FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET", "")  # ex: poultry-project-2ba07.appspot.com
 
 # ===== تهيئة Firebase =====
 creds_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
@@ -28,8 +27,7 @@ if not firebase_admin._apps:
     })
 
 db = firestore.client()
-gcs_client = storage.Client() if FIREBASE_STORAGE_BUCKET else None
-bucket = gcs_client.bucket(FIREBASE_STORAGE_BUCKET) if gcs_client else None
+bucket = storage.bucket(FIREBASE_STORAGE_BUCKET) if FIREBASE_STORAGE_BUCKET else None
 
 
 # ===== نموذج البريد القادم من Gmail =====
