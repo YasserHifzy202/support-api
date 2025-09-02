@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: support-api
+    runtime: python
+    buildCommand: ""
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    envVars:
+      - key: INBOUND_API_KEY
+        value: SUPPORT_KEY_2025
+    plan: free
